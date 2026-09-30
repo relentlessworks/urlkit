@@ -1,0 +1,81 @@
+name: Tag & Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '*.md', 'LICENSE']
+
+permissions:
+  contents: write
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Read version
+        id: version
+        run: echo "version=v$(cat VERSION)" >> $GITHUB_OUTPUT
+      - name: Check if tag exists
+        id: check
+        run: |
+          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Create tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
+      - name: Build binary
+        run: |
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags "-s -w" -o dist/urlkit-${{ matrix.goos }}-${{ matrix.goarch }}${ext} ./cmd/urlkit
+          tar -czf dist/urlkit-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz -C dist urlkit-${{ matrix.goos }}-${{ matrix.goarch }}${ext} README.md LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: urlkit-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/urlkit-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+
+  publish:
+    needs: tag-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read version
+        id: version
+        run: echo "version=v$(cat VERSION)" >> $GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: dist/*.tar.gz
+          dist/checksums.txt
+          generate_release_notes: true
